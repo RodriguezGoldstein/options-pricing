@@ -95,12 +95,14 @@
       <textarea id="diag" class="mono" rows="12">(run diagnostics)</textarea>
     </div>
   </div>
-    <div class="card strategy-card">
+<div class="column">  
+    <div class="card">
       <div class="row" style="justify-content:space-between; align-items:center">
         <strong>Strategy</strong>
       </div>
       <div id="strategy" class="mono" style="white-space:pre-wrap; margin-top:8px; color:#111">(run simulation to see strategy recommendation)</div>
     </div>
+</div>
   <div class="column">
         <div class="card">
       <div class="row" style="justify-content:space-between; align-items:center">
@@ -128,6 +130,12 @@
       </div>
       <svg id="payoffDiagram" class="chart"></svg>
     </div>
+    <div class="card">
+      <div class="row" style="justify-content:space-between; align-items:center">
+        <strong>Profit Distribution (exec price)</strong>
+      </div>
+      <svg id="profitHist" class="chart"></svg>
+    </div>
   </div>
   </div>
   <script>
@@ -136,6 +144,10 @@
     const $ = (id) => document.getElementById(id) || null;
     const bind = (id, evt, handler) => { const el=$(id); if(!el||!el.addEventListener){ console.error(`[fatal] bind ${evt} #${id}`); return false;} el.addEventListener(evt,handler,{passive:false}); console.log(`[bind] ${evt} #${id}`); return true; };
     // tooltip (shared)
+
+    // persist marketPrice in localStorage
+    function persistMarketPriceInit(){ try{ const me = document.getElementById('marketPrice'); if(me){ try{ const v = localStorage.getItem('marketPrice'); if(v!==null) me.value = v; }catch(e){} me.addEventListener('change', ()=>{ try{ if(me.value==='') localStorage.removeItem('marketPrice'); else localStorage.setItem('marketPrice', me.value); }catch(e){} }); } }catch(e){} }
+
     function createTooltip(){
       let div=d3.select('body').append('div').attr('class','tooltip').style('opacity',0);
       function show(html, evt){ div.html(html).style('opacity',1).style('left', (evt.clientX+10)+'px').style('top',(evt.clientY+10)+'px'); }
@@ -143,6 +155,7 @@
       return {div, show, hide};
     }
     const tooltip = createTooltip();
+    try{ persistMarketPriceInit(); }catch(e){}
     // --------- readers (defensive) ---------
     const readSelect = (id, fallback) => { const el=$(id); const v=el && el.value; return (v===undefined||v===null||v==='')? fallback : v; };
     const readNum = (id, fallback) => { const el=$(id); const v = el? parseFloat(el.value) : NaN; return Number.isFinite(v)? v : fallback; };
@@ -402,7 +415,7 @@
         // robustly locate the strategy element; prefer existing #strategy inside .strategy-card
         let stratEl = document.getElementById('strategy') || document.querySelector('.strategy-card #strategy') || (function(){ const sc = document.querySelector('.strategy-card'); return sc ? sc.querySelector('.mono') : null; })();
         // if still missing, create a strategy div inside the strategy card so UI layout remains consistent
-        if(!stratEl){ const sc = document.querySelector('.strategy-card'); if(sc){ const nd = document.createElement('div'); nd.id='strategy'; nd.className='mono'; nd.style.whiteSpace='pre-wrap'; nd.style.marginTop='8px'; nd.style.color='#111'; nd.textContent='(strategy placeholder)'; sc.appendChild(nd); stratEl = nd; } }
+        if(!stratEl){ const sc = document.querySelector('.strategy-card'); if(sc){ const nd = document.createElement('div'); nd.id='strategy'; nd.className='mono'; nd.style.whiteSpace='pre-wrap'; nd.style.marginTop='8px'; nd.style.color='#111'; nd.textContent=''; sc.appendChild(nd); stratEl = nd; } }
         if(stratEl){
           const meanPrice = dispMean; const sePrice = Math.max(1e-12, dispSe);
           const lower95 = dispCIL; const upper95 = dispCIH;
@@ -437,9 +450,26 @@
           const sorted = profits.slice().filter(Number.isFinite).sort((a,b)=>a-b);
           function quantile(arr,q){ if(arr.length===0) return NaN; const idx=(arr.length-1)*q; const lo=Math.floor(idx), hi=Math.ceil(idx); if(lo===hi) return arr[lo]; return arr[lo] + (arr[hi]-arr[lo])*(idx-lo); }
           const med = quantile(sorted,0.5), q5 = quantile(sorted,0.05), q95 = quantile(sorted,0.95);
-          // format output
-          const pct = (conf*100).toFixed(1)+'%';
-          const txt = [];
+          // draw profit histogram in 3rd column panel
+          try{ const profitArr = profits; const bins=40; let vmin=Infinity,vmax=-Infinity; for(const v of profitArr){ if(v<vmin) vmin=v; if(v>vmax) vmax=v; } if(!Number.isFinite(vmin)||!Number.isFinite(vmax)){ vmin=0; vmax=1; } let width=vmax-vmin; if(width<=1e-12){ vmin-=0.5; vmax+=0.5; width=vmax-vmin; } const centers=new Array(bins), counts=new Array(bins).fill(0); for(const v of profitArr){ let idx=Math.floor(((v-vmin)/width)*bins); if(idx<0) idx=0; if(idx>=bins) idx=bins-1; counts[idx]++; } for(let i=0;i<bins;i++) centers[i]=vmin+(i+0.5)*(width/bins); try{ drawHistogramD3('#profitHist', centers, counts); }catch(e){ console.warn('[strategy] draw profit hist failed', e); } }catch(e){console.warn('[strategy] profit hist prep failed', e);}
+
+          // format output as HTML with tooltips
+          const pct = (conf*100).toFixed(1) + '%';
+          function esc(v){ return String(v).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;'); }
+          function row(label, value, tip){ return `<div style="margin:6px 0"><b>${esc(label)}:</b> <span title="${esc(tip||'')}">${esc(value)}</span></div>`; }
+          let html = '';
+          html += row('Recommendation', `${action} (${sp.type.toUpperCase()})`, 'Suggested action based on reference and z-threshold');
+          html += row('Reference used', `${refName} ($${fmt(refPrice,4)})`, 'Reference price used for decision');
+          html += row('MC fair price', `$${fmt(meanPrice,4)}   95% CI: [${fmt(lower95,4)}, ${fmt(upper95,4)}]`, 'Monte Carlo estimated fair price and 95% CI');
+          html += row('Decision z', `${fmt(z,4)} (threshold ${fmt(decisionZ,3)})`, 'Standardised difference (MC mean - reference) / MC SE');
+          html += row('Execution price (used)', `$${fmt(execPrice,4)}`, 'Price used to compute profit distribution');
+          html += row('Confidence', `${pct}`, 'Heuristic confidence from MC SE (normal approx)');
+          html += row('Expected profit (mean)', `$${fmt(meanProfit,4)}`, 'Mean(profit = payoff - execution price) across simulations');
+          html += row('Prob(profit>0)', `${(probPositive*100).toFixed(1)}%`, 'Empirical probability profit > 0 in simulations');
+          html += row('Profit percentiles (5%/50%/95%)', `$${fmt(q5,4)} / $${fmt(med,4)} / $${fmt(q95,4)}`, 'Empirical profit percentiles across simulations');
+          html += '<div style="margin-top:8px; font-size:12px; color:#666">Note: distributions are over simulated discounted payoffs; results are heuristic and not financial advice.</div>';
+          stratEl.innerHTML = html;
+
           txt.push(`\n\nRecommendation: ${action} (${sp.type.toUpperCase()})`);
           txt.push(`Reference used: ${refName} ($${fmt(refPrice,4)})`);
           txt.push(`MC fair price: $${fmt(meanPrice,4)} \n\n95% CI: [${fmt(lower95,4)}, ${fmt(upper95,4)}]`);
