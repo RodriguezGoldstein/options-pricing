@@ -31,6 +31,8 @@
     .sw.gray{background:#777}
     .hint{font-size:12px; color:#666}
     .tooltip{position:fixed; pointer-events:none; background:rgba(0,0,0,.8); color:#fff; padding:6px 8px; border-radius:6px; font-size:12px; line-height:1.2; transform:translate(8px,8px); z-index:9999}
+    .strategy-card{background:linear-gradient(90deg, #f8fbff, #ffffff); border-left:4px solid #4b9ce2; box-shadow:0 2px 6px rgba(75,156,226,0.08);}
+    .strategy-card h4{margin:0 0 6px 0}
   </style>
   <script src="https://cdn.jsdelivr.net/npm/d3@7"></script>
 </head>
@@ -45,7 +47,7 @@
         <div class="row">
         <div style="flex:1"><label for="S0">S₀</label><input id="S0" type="number" value="100" step="1"></div>
         <div style="flex:1"><label for="K">K</label><input id="K" type="number" value="100" step="1"></div>
-        <div style="flex:1">  </div>
+        <div style="flex:1"><label for="marketPrice">Market Price</label><input id="marketPrice" type="number" placeholder="(optional)" step="0.01"></div>
         </div>
       <div class="row">
         <div style="flex:1"><label for="r">r</label><input id="r" type="number" value="0.03" step="0.001"></div>
@@ -59,6 +61,11 @@
         <div style="flex:1"><label for="cv">control variate</label><select id="cv"><option value="1" selected>on</option><option value="0">off</option></select></div>
         <div style="flex:1"><label for="bsRisk">BS model‑risk CI (%)</label><input id="bsRisk" type="number" value="5" step="0.5"></div>
         <div style="flex:1">  </div>
+      </div>
+      <div class="row" style="margin-top:6px">
+        <div style="flex:1"><label for="strategySource">Strategy Source</label><select id="strategySource"><option value="auto" selected>auto (market if provided)</option><option value="market">market</option><option value="bs">Black–Scholes</option></select></div>
+        <div style="flex:1"><label for="decisionZ">Decision Z‑threshold</label><input id="decisionZ" type="number" value="1.645" step="0.01"></div>
+        <div style="flex:1"></div>
       </div>
       <div class="row" style="margin-top:var(--gap)">
         <div style="flex:1">
@@ -88,6 +95,12 @@
       <textarea id="diag" class="mono" rows="12">(run diagnostics)</textarea>
     </div>
   </div>
+    <div class="card strategy-card">
+      <div class="row" style="justify-content:space-between; align-items:center">
+        <strong>Strategy</strong>
+      </div>
+      <div id="strategy" class="mono" style="white-space:pre-wrap; margin-top:8px; color:#111">(run simulation to see strategy recommendation)</div>
+    </div>
   <div class="column">
         <div class="card">
       <div class="row" style="justify-content:space-between; align-items:center">
@@ -350,6 +363,9 @@
     async function runSim(){
       console.log('[runSim] invoked');
       const p={ type: readSelect('optType','call'), S0: readNum('S0',100), K: readNum('K',100), r: readNum('r',0.03), sigma: readNum('sigma',0.25), T: readNum('T',0.5), steps: readInt('steps',128), paths: readInt('paths',80000), seed: readInt('seed',12345) };
+      const marketPrice = readNum('marketPrice', NaN);
+      const strategySource = readSelect('strategySource','auto');
+      const decisionZ = readNum('decisionZ',1.645);
       const useCV = readSelect('cv','1')==='1';
       const useAntithetic = readSelect('antithetic','1')==='1';
       const pathsLog = readSelect('pathsLog','0')==='1';
@@ -380,6 +396,63 @@
       drawBarsD3('#bars', labels, values, ciForBarsLow, ciForBarsHigh);
       drawPathsD3('#pathsChart', paths, pathsLog);
       drawPayoffD3('#payoffDiagram', sp.K, sp.type, ST, payoffs, payoffLog);
+
+      // --- Strategy recommendation ---
+      try{
+        // robustly locate the strategy element; prefer existing #strategy inside .strategy-card
+        let stratEl = document.getElementById('strategy') || document.querySelector('.strategy-card #strategy') || (function(){ const sc = document.querySelector('.strategy-card'); return sc ? sc.querySelector('.mono') : null; })();
+        // if still missing, create a strategy div inside the strategy card so UI layout remains consistent
+        if(!stratEl){ const sc = document.querySelector('.strategy-card'); if(sc){ const nd = document.createElement('div'); nd.id='strategy'; nd.className='mono'; nd.style.whiteSpace='pre-wrap'; nd.style.marginTop='8px'; nd.style.color='#111'; nd.textContent='(strategy placeholder)'; sc.appendChild(nd); stratEl = nd; } }
+        if(stratEl){
+          const meanPrice = dispMean; const sePrice = Math.max(1e-12, dispSe);
+          const lower95 = dispCIL; const upper95 = dispCIH;
+          // choose reference according to user toggle (auto / market / bs)
+          let refName = 'BS';
+          let refPrice = bs;
+          if(strategySource === 'market' && Number.isFinite(marketPrice)) { refName = 'market'; refPrice = marketPrice; }
+          else if(strategySource === 'auto' && Number.isFinite(marketPrice)){ refName = 'market'; refPrice = marketPrice; }
+          // compute z score relative to chosen reference
+          const z = (meanPrice - refPrice)/sePrice;
+          // decision: use threshold provided by user
+          let action = 'Hold';
+          if(z > decisionZ) action = 'Buy'; else if(z < -decisionZ) action = 'Sell'; else action = 'Hold';
+          // compute execution price: marketPrice if user chose market (or auto with market present), else conservative CI bound for buy/sell
+          let execPrice = refPrice;
+          if(refName === 'BS' && action !== 'Hold'){
+            execPrice = action === 'Buy' ? lower95 : upper95;
+          }
+          // confidence (heuristic) using normal CDF
+          let conf = 0.5;
+          if(action === 'Buy') conf = cdfN(z);
+          else if(action === 'Sell') conf = 1 - cdfN(z);
+          else conf = Math.max(0.01, Math.min(0.99, cdfN(Math.abs(z))));
+          // profit distribution (buy perspective): payoff - execPrice
+          const nS = payoffs.length;
+          const profits = new Array(nS);
+          let psum = 0, posCount = 0;
+          for(let i=0;i<nS;i++){ const v = payoffs[i] - execPrice; profits[i] = v; psum += v; if(v>0) posCount++; }
+          const meanProfit = psum / Math.max(1,nS);
+          const probPositive = (posCount / Math.max(1,nS));
+          // percentiles
+          const sorted = profits.slice().filter(Number.isFinite).sort((a,b)=>a-b);
+          function quantile(arr,q){ if(arr.length===0) return NaN; const idx=(arr.length-1)*q; const lo=Math.floor(idx), hi=Math.ceil(idx); if(lo===hi) return arr[lo]; return arr[lo] + (arr[hi]-arr[lo])*(idx-lo); }
+          const med = quantile(sorted,0.5), q5 = quantile(sorted,0.05), q95 = quantile(sorted,0.95);
+          // format output
+          const pct = (conf*100).toFixed(1)+'%';
+          const txt = [];
+          txt.push(`\n\nRecommendation: ${action} (${sp.type.toUpperCase()})`);
+          txt.push(`Reference used: ${refName} ($${fmt(refPrice,4)})`);
+          txt.push(`MC fair price: $${fmt(meanPrice,4)} \n\n95% CI: [${fmt(lower95,4)}, ${fmt(upper95,4)}]`);
+          txt.push(`Decision z: ${fmt(z,4)} \n\nThreshold: ${fmt(decisionZ,3)}`);
+          txt.push(`Execution price (used): $${fmt(execPrice,4)}`);
+          txt.push(`Confidence of favourable outcome: ${pct}`);
+          txt.push(`Expected profit (mean): $${fmt(meanProfit,4)} \n\nProb(profit>0): ${(probPositive*100).toFixed(1)}%`);
+          txt.push(`Profit percentiles (5/50/95):\n$${fmt(q5,4)} / $${fmt(med,4)} / $${fmt(q95,4)}\n`);
+          txt.push('Note: Distributions are over simulated discounted payoffs; results are heuristic and not financial advice.');
+          stratEl.textContent = txt.join('\n\n');
+                  }
+      }catch(e){ console.warn('[strategy] compute failed', e); }
+
     }
     async function runDiagnostics(){
       console.log('[runDiagnostics] invoked');
