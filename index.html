@@ -89,9 +89,9 @@
         white-space: pre-wrap;
       }
       svg.chart {
-        display: block;
+        display: flex;
         width: 100%;
-        height: 340px;
+        height: 265px;
         border-radius: 8px;
         background: #fafafa;
         overflow: hidden;
@@ -223,7 +223,7 @@
             <div style="flex: 1">
               <label for="bsRisk">BS Risk CI (%)</label
               ><input id="bsRisk" type="number" value="5" step="0.5" />
-            </div>            
+            </div>
             <!-- <div style="flex: 1">
               <label for="cv">Control Variate</label
               ><select id="cv">
@@ -269,7 +269,29 @@
           </div>
           <br />
           <div style="flex: 1">
-            <button id="runBtn">Run Simulation</button>
+            <div style="display: flex; gap: 8px; align-items: center">
+              <button id="runBtn">Run Simulation</button>
+              <label
+                style="
+                  font-size: 12px;
+                  display: none;
+                  align-items: center;
+                  gap: 6px;
+                "
+                ><input id="showHeatmap" type="checkbox" checked />
+                Heatmap</label
+              >
+              <label
+                style="
+                  font-size: 12px;
+                  display: none;
+                  align-items: center;
+                  gap: 6px;
+                "
+                ><input id="showSpaghetti" type="checkbox" checked /> Paths
+                bands</label
+              >
+            </div>
           </div>
         </div>
         <div class="card">
@@ -279,11 +301,7 @@
           >
             <strong>Strategy</strong>
           </div>
-          <div
-            id="strategy"
-            class="mono"
-            style="white-space: pre-wrap; margin-top: 8px; color: #111">
-          </div>
+          <div id="strategy" class="mono"></div>
         </div>
         <div class="card">
           <div
@@ -294,7 +312,7 @@
             <!--<button id="runDiag" class="secondary">Run Diagnostics</button>-->
           </div>
           <textarea id="diag" class="mono" rows="12"></textarea>
-        </div>        
+        </div>
       </div>
       <div class="column">
         <div class="card">
@@ -302,11 +320,29 @@
             class="row"
             style="justify-content: space-between; align-items: center"
           >
-            <strong>Simulated Price Paths</strong>
+            <strong>Paths Simulated Price</strong>
           </div>
           <svg id="pathsChart" class="chart"></svg>
         </div>
         <div class="card">
+          <div
+            class="row"
+            style="justify-content: space-between; align-items: center"
+          >
+            <strong>Paths Percentile Bands</strong>
+          </div>
+          <svg id="spaghettiChart" class="chart"></svg>
+        </div>        
+<div class="card">
+          <div
+            class="row"
+            style="justify-content: space-between; align-items: center"
+          >
+            <strong>Profit Distribution</strong>
+          </div>
+          <svg id="profitHist" class="chart"></svg>
+        </div>        
+        <div class="card" style="display: none;">
           <div
             class="row"
             style="justify-content: space-between; align-items: center"
@@ -340,9 +376,9 @@
             class="row"
             style="justify-content: space-between; align-items: center"
           >
-            <strong>Profit Distribution (exec price)</strong>
+            <strong>Profit Heatmap (P(profit&gt;0))</strong>
           </div>
-          <svg id="profitHist" class="chart"></svg>
+          <svg id="profitHeatmap" class="chart"></svg>
         </div>
       </div>
     </div>
@@ -1198,6 +1234,155 @@
               .call(zoom.transform, d3.zoomIdentity);
           });
         }
+        // Spaghetti + percentile bands
+        function drawSpaghettiD3(svgSel, paths, logY) {
+          const svg = d3.select(svgSel);
+          const { g, plot, iw, ih } = setupSVG(svg);
+          if (!Array.isArray(paths) || paths.length === 0) return;
+          const nSteps = paths[0].length;
+          const pcts = [0.05, 0.25, 0.5, 0.75, 0.95];
+          const series = pcts.map(() => new Array(nSteps));
+          for (let t = 0; t < nSteps; t++) {
+            const col = paths
+              .map((p) => p[t])
+              .filter(Number.isFinite)
+              .sort((a, b) => a - b);
+            if (col.length === 0) {
+              for (let k = 0; k < pcts.length; k++) series[k][t] = NaN;
+              continue;
+            }
+            for (let k = 0; k < pcts.length; k++) {
+              const idx = (col.length - 1) * pcts[k];
+              const lo = Math.floor(idx),
+                hi = Math.ceil(idx);
+              series[k][t] =
+                lo === hi
+                  ? col[lo]
+                  : col[lo] + (col[hi] - col[lo]) * (idx - lo);
+            }
+          }
+          const xs = d3.range(nSteps);
+          const x = d3
+            .scaleLinear()
+            .domain([0, nSteps - 1])
+            .range([0, iw]);
+          const vals = paths.flat().filter(Number.isFinite);
+          const yDomain = d3.extent(
+            vals.map((v) => (logY ? Math.log(Math.max(1e-12, v)) : v)),
+          );
+          const y = d3.scaleLinear().domain(yDomain).nice().range([ih, 0]);
+          g.append("g")
+            .attr("transform", `translate(0,${ih})`)
+            .call(d3.axisBottom(x));
+          g.append("g").call(d3.axisLeft(y));
+          const area95 = d3
+            .area()
+            .x((d, i) => x(i))
+            .y0((d, i) => y(series[0][i]))
+            .y1((d, i) => y(series[4][i]));
+          plot
+            .append("path")
+            .datum(xs)
+            .attr("fill", "rgba(75,156,226,0.12)")
+            .attr("d", area95);
+          const area50 = d3
+            .area()
+            .x((d, i) => x(i))
+            .y0((d, i) => y(series[1][i]))
+            .y1((d, i) => y(series[3][i]));
+          plot
+            .append("path")
+            .datum(xs)
+            .attr("fill", "rgba(75,156,226,0.22)")
+            .attr("d", area50);
+          const line = d3
+            .line()
+            .x((d, i) => x(i))
+            .y((d, i) => y(series[2][i]));
+          plot
+            .append("path")
+            .datum(xs)
+            .attr("fill", "none")
+            .attr("stroke", "#111")
+            .attr("stroke-width", 1.2)
+            .attr("d", line);
+          const sampleN = Math.min(40, paths.length);
+          for (let i = 0; i < sampleN; i++) {
+            plot
+              .append("path")
+              .datum(paths[i])
+              .attr("fill", "none")
+              .attr("stroke", "rgba(239,68,68,0.35)")
+              .attr("stroke-width", 0.6)
+              .attr(
+                "d",
+                d3
+                  .line()
+                  .x((d, i) => x(i))
+                  .y((d) => y(logY ? Math.log(Math.max(1e-12, d)) : d)),
+              );
+          }
+          plot
+            .append("rect")
+            .attr("fill", "transparent")
+            .attr("pointer-events", "all")
+            .attr("x", 0)
+            .attr("y", 0)
+            .attr("width", iw)
+            .attr("height", ih)
+            .on("mousemove", (evt) => {
+              const pt = d3.pointer(evt);
+              const t = Math.round(x.invert(pt[0]));
+              if (t < 0 || t >= nSteps) return tooltip.hide();
+              tooltip.show(
+                `<b>t</b> ${t}<br><b>median</b> ${fmt(series[2][t], 4)}`,
+                evt,
+              );
+            })
+            .on("mouseleave", () => tooltip.hide());
+        }
+
+        // Profit heatmap (K x exec price): color = P(profit>0)
+        function drawProfitHeatmapD3(svgSel, Kvals, Xvals, matrix) {
+          const svg = d3.select(svgSel);
+          const { g, plot, iw, ih } = setupSVG(svg);
+          if (!Array.isArray(Kvals) || !Array.isArray(Xvals)) return;
+          const x = d3.scaleLinear().domain(d3.extent(Xvals)).range([0, iw]);
+          const y = d3.scaleLinear().domain(d3.extent(Kvals)).range([ih, 0]);
+          const cellW = iw / Xvals.length;
+          const cellH = ih / Kvals.length;
+          const color = d3
+            .scaleSequential(d3.interpolateViridis)
+            .domain([0, 1]);
+          const data = [];
+          for (let r = 0; r < Kvals.length; r++) {
+            for (let c = 0; c < Xvals.length; c++) {
+              data.push({ r, c, k: Kvals[r], xval: Xvals[c], v: matrix[r][c] });
+            }
+          }
+          plot
+            .selectAll("rect.cell")
+            .data(data)
+            .join("rect")
+            .attr("class", "cell")
+            .attr("x", (d) => x(d.xval) - cellW / 2)
+            .attr("y", (d) => y(d.k) - cellH / 2)
+            .attr("width", Math.max(1, cellW - 1))
+            .attr("height", Math.max(1, cellH - 1))
+            .attr("fill", (d) => color(Number.isFinite(d.v) ? d.v : 0))
+            .on("mousemove", (evt, d) =>
+              tooltip.show(
+                `<b>K</b> ${fmt(d.k, 3)}<br><b>exec</b> ${fmt(d.xval, 3)}<br><b>P&gt;0</b> ${(d.v * 100).toFixed(1)}%`,
+                evt,
+              ),
+            )
+            .on("mouseleave", () => tooltip.hide());
+          g.append("g")
+            .attr("transform", `translate(0,${ih})`)
+            .call(d3.axisBottom(x).ticks(6));
+          g.append("g").call(d3.axisLeft(y).ticks(6));
+        }
+
         // ---------- Orchestration ----------
         async function runSim() {
           console.log("[runSim] invoked");
@@ -1339,6 +1524,67 @@
           drawBarsD3("#bars", labels, values, ciForBarsLow, ciForBarsHigh);
           drawPathsD3("#pathsChart", paths, pathsLog);
           drawPayoffD3("#payoffDiagram", sp.K, sp.type, ST, payoffs, payoffLog);
+
+          // optional: profit heatmap and spaghetti percentile bands
+          try {
+            const showHeat =
+              document.getElementById("showHeatmap") &&
+              document.getElementById("showHeatmap").checked;
+            const showSpag =
+              document.getElementById("showSpaghetti") &&
+              document.getElementById("showSpaghetti").checked;
+            if (showSpag) drawSpaghettiD3("#spaghettiChart", paths, pathsLog);
+            else d3.select("#spaghettiChart").selectAll("*").remove();
+            if (showHeat) {
+              const sampleN = Math.min(ST.length, 20000);
+              const step = Math.max(1, Math.floor(ST.length / sampleN));
+              const STsamp = [];
+              for (let i = 0; i < ST.length; i += step) STsamp.push(ST[i]);
+              const Kbins = 20,
+                Xbins = 20;
+              const Kmin = sp.K * 0.7,
+                Kmax = sp.K * 1.3;
+              const centerExec = Number.isFinite(marketPrice)
+                ? marketPrice
+                : (mean ?? 0);
+              const Xmin = centerExec * 0.7,
+                Xmax = Math.max(centerExec * 1.3, centerExec + 1e-8);
+              const Kvals = new Array(Kbins)
+                .fill(0)
+                .map((_, i) => Kmin + (i / (Kbins - 1)) * (Kmax - Kmin));
+              const Xvals = new Array(Xbins)
+                .fill(0)
+                .map((_, i) => Xmin + (i / (Xbins - 1)) * (Xmax - Xmin));
+              const matrix = new Array(Kbins)
+                .fill(0)
+                .map(() => new Array(Xbins).fill(0));
+              for (let r = 0; r < Kbins; r++) {
+                const Kj = Kvals[r];
+                const pays = STsamp.map((s) =>
+                  sp.type === "call"
+                    ? Math.max(s - Kj, 0)
+                    : Math.max(Kj - s, 0),
+                );
+                pays.sort((a, b) => a - b);
+                const nSamp = pays.length;
+                for (let c = 0; c < Xbins; c++) {
+                  const ex = Xvals[c];
+                  let lo = 0,
+                    hi = nSamp;
+                  while (lo < hi) {
+                    const mid = (lo + hi) >> 1;
+                    if (pays[mid] <= ex) lo = mid + 1;
+                    else hi = mid;
+                  }
+                  const count = Math.max(0, nSamp - lo);
+                  matrix[r][c] = count / Math.max(1, nSamp);
+                }
+              }
+              drawProfitHeatmapD3("#profitHeatmap", Kvals, Xvals, matrix);
+            } else d3.select("#profitHeatmap").selectAll("*").remove();
+          } catch (err) {
+            console.warn("[strategy] extra charts failed", err);
+          }
 
           // --- Strategy recommendation ---
           try {
@@ -1673,9 +1919,7 @@
             line(
               `Antithetic Variance (SE): ${seDrop ? "PASS" : "FAIL"} base=${se1.toFixed(6)} anti=${se2.toFixed(6)}`,
             );
-            line(
-              `Antithetic Truncation Size: ${oddOK ? "PASS" : "FAIL"}`,
-            );
+            line(`Antithetic Truncation Size: ${oddOK ? "PASS" : "FAIL"}`);
             // Write diagnostics only to the fallback pre#diag_out (hide textarea)
             console.log(
               "[runDiagnostics] writing diagnostics to #diag_out only",
